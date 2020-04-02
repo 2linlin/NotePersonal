@@ -8,7 +8,7 @@ tags:
 top:
 ---
 
-最近开发中遇到了一个问题，从第三方接口接入数据时，接口中的一个字段是Timestamp类型，但是第三方给了1899年时间的脏数据，导致后续处理时产生Bug。所以需要在fastjson进行反序列化时，对这个字段专门进行处理，凡是不符合规则的时间json字符串，都改为"1970-01-01 08:00:00.001"。
+最近开发中遇到一个问题，从第三方接口接入数据时，接口中的一个字段是Timestamp类型，但是第三方给了1899年时间的脏数据，导致后续处理时产生Bug。所以需要在fastjson进行反序列化时，对这个字段专门进行处理，凡是不符合规则的时间json字符串，都改为"1970-01-01 08:00:00.001"。
 
 具体的处理方法是，实现`com.alibaba.fastjson.parser.deserializer.ObjectDeserializer`接口，然后在对应的实体里，加上注解`@JSONField(deserializeUsing = YourImplDeserializer.class)`即可。这样，在反序列化时，就可以按我们定制的方式处理了。
 
