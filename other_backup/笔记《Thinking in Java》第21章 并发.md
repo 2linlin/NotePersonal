@@ -42,7 +42,7 @@ Java是在顺序型语言的基础上提供线程支持的。它的并发是用�
 
 使用线程机制的好处就是，它是对操作系统透明的。如果性能不够用，那么加一个多处理器，就很容易加快程序速度。多CPU的系统就是要玩多线程才有意思啊。
 
-##### 2.1.定义任务
+##### 2.1.定义任务Runnable
 
 就是定义多线程执行的任务，直接实现`Runnable`就行：
 
@@ -131,7 +131,7 @@ public class UserThread {
 
 `ExecutorService`实现了`Executor`接口。`shutdown()`方法被调用后，它之前的任务继续执行直至结束。
 
-线程池用`Executor`的静态方法`newXXXXPoll()`创建，常用的有以下几种：
+线程池用`Executor`的静态方法`newXXXXPool()`创建，常用的有以下几种：
 
 - CachedThreadPool：为每个任务都创建一个线程。
 - FixedThreadPool：给定n个线程。
@@ -139,7 +139,178 @@ public class UserThread {
 - WorkStealingPool
 - ScheduledThreadPoolExecutor
 
-##### 2.4.定义有返回值的任务
+##### 2.4.定义有返回值的任务Callable
 
-未完待续...
+`runnable.run()`任务没有返回值。如果希望有返回值，那么用`callable.call()`(Callable<T>和public T call())实现。
+
+这个接口是JavaSE5引入的。只能使用`executorService.submit()`调用（区别于`executorService.execute()`）。
+
+`submit()`返回`Future<T>`对象，其中`T`是`call()`方法的返回值。
+
+用法示例：
+
+```java
+public class TaskWithResult implements Callable<String> {
+    private int taskId;
+
+    public TaskWithResult(int id) {
+        this.taskId = id;
+    }
+
+    public String call() throws Exception {
+        return "callable task id: " + taskId;
+    }
+}
+
+public class UseCallable {
+    public static void main(String[] args) {
+        ExecutorService executorService = Executors.newCachedThreadPool();
+
+        List<Future<String>> futures = new ArrayList<Future<String>>();
+
+        for (int i = 0; i < 5; i++) {
+            futures.add(executorService.submit(new TaskWithResult(i)));
+        }
+
+        futures.stream().forEach(future -> {
+            try {
+                System.out.println(future.get());
+            } catch (InterruptedException e) {
+                e.printStackTrace();
+            } catch (ExecutionException e) {
+                e.printStackTrace();
+            }
+        });
+        executorService.shutdown();
+    }
+}
+```
+
+其中，调用`Future.get()`，`get`将阻塞，直到有结果出来。
+
+也可以调用`future.get(long)`，超时直接返回。
+
+还可以调用`future.isDone()`，看下有没有执行完了。
+
+`Future`接口源码：
+
+```java
+public interface Future<V> {
+	boolean cancel(boolean mayInterruptIfRunning);
+    V get() throws InterruptedException, ExecutionException;
+    V get(long timeout, TimeUnit unit)
+        throws InterruptedException, ExecutionException, TimeoutException;
+    
+    boolean isCancelled();
+    boolean isDone();
+}
+```
+
+##### 2.5 Thread.sleep()方法
+
+`Thread.field()`方法是让出当前CPU使用权。`sleep()`则是当前线程阻塞等待一会儿。
+
+由于`sleep()`使线程进入了等待状态，所以可以抛出`InterruptedException`异常。
+
+示例代码：
+
+```java
+public class UseThread {
+    public static void main(String[] args) {
+        ExecutorService exec = Executors.newCachedThreadPool();
+        for (int i = 0; i < 5; i++) {
+            exec.execute(new Liftoff());
+            System.out.println("Waiting for Liftoff...");
+        }
+        exec.shutdown();
+    }
+}
+
+public class Liftoff implements Runnable {
+    private static int taskCount = 0;   // 用来记载新建的线程数量
+    private final int id = taskCount++;
+
+    protected int countDown = 10;
+
+    public void run() {
+        while (countDown-- > 0) {
+            System.out.print("#" + id + "(" + (countDown > 0 ? countDown : "Liftoff!") + "), ");
+            try {
+                Thread.sleep(1000); // 等待一会儿
+                // TimeUnit.SECONDS.sleep(1); // 或者可用Java5新引入的这个类，显示指定等待单位
+            } catch (InterruptedException e) {
+                e.printStackTrace();
+            }
+        }
+    }
+}
+```
+
+##### 2.6 设置线程优先级
+
+tips: 可以用`Thread.currentThread()`获取当前线程对象。
+
+用`thread.getPriority()`，`thread.setPriority(int)`来获取/设置线程优先级。
+
+优先级高只能说该线程可能会更优先，并不能一定保证它最优先执行。
+
+`JDK`有10个优先级，而不同的操作系统优先级不定，它们一般不能很好的映射。唯一能靠谱点的用法是，仅用`Thread.MAX_PRIORITY`、`Thread.NORM_PRIORITY`、`Thread.MIN_PRIORITY`来设置优先级。
+
+以下为示例代码：
+
+```java
+public class TreadPriority implements Runnable {
+    private int priority;
+    private volatile double dub;    // 加上volatile防止编译器优化
+
+    public TreadPriority(int priority) {
+        this.priority = priority;
+    }
+
+    @Override
+    public void run() {
+        Thread.currentThread().setPriority(priority);
+        // 耗时运算，看是不是优先级高的先算完
+        for (int i = 0; i < 100000; i++) {
+            dub += Math.PI + Math.E / (double)i;
+            if (i % 1000 == 0) {
+                Thread.yield(); // 定期声明让出控制权，重新按优先级分配
+            }
+        }
+        System.out.println(Thread.currentThread());
+    }
+
+    public static void main(String[] args) {
+        ExecutorService  executorService = Executors.newCachedThreadPool();
+
+        for (int i = 0; i < 10; i++) {
+            executorService.execute(
+                    new TreadPriority(i % 2 == 0 ? Thread.MIN_PRIORITY : Thread.MAX_PRIORITY));
+        }
+        executorService.shutdown(); // 记得关闭线程池
+    }
+}
+// 结果：
+Thread[pool-1-thread-2,10,main]
+Thread[pool-1-thread-8,10,main]
+Thread[pool-1-thread-10,10,main]
+Thread[pool-1-thread-6,10,main]
+Thread[pool-1-thread-4,10,main]
+Thread[pool-1-thread-3,1,main]
+Thread[pool-1-thread-1,1,main]
+Thread[pool-1-thread-5,1,main]
+Thread[pool-1-thread-9,1,main]
+Thread[pool-1-thread-7,1,main]
+```
+
+可以看到，优先级高的5个线程都是最先完成运算的。
+
+##### 2.6 Thread.yeild()方法
+
+这个方法前面已经用过了。注意几点：
+
+- `yeild()`只是声明自己让出控制权，只是对调度器的一种建议。
+- 调用`yeild()`时，是建议**具有相同优先级**的其他线程可以运行。
+
+一般对于重要的控制，都不会依赖于`yeild()`。
 
