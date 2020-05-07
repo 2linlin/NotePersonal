@@ -305,7 +305,7 @@ Thread[pool-1-thread-7,1,main]
 
 可以看到，优先级高的5个线程都是最先完成运算的。
 
-##### 2.6 Thread.yeild()方法
+##### 2.7 Thread.yeild()方法
 
 这个方法前面已经用过了。注意几点：
 
@@ -313,4 +313,167 @@ Thread[pool-1-thread-7,1,main]
 - 调用`yeild()`时，是建议**具有相同优先级**的其他线程可以运行。
 
 一般对于重要的控制，都不会依赖于`yeild()`。
+
+##### 2.8 后台线程
+
+后台线程就是一直在后台跑，**直到所有线程退出，它才退出的线程**。通过在线程启动之前调用`thread.setDaemon()`方法，把一个线程设置为后台线程。
+
+显示的把一个线程设置成后台线程。代码示例：
+
+```java
+public class DaemonThread implements Runnable {
+
+    @Override
+    public void run() {
+        while (true) {
+            try {
+                Thread.sleep(100L);
+                System.out.println(Thread.currentThread() + " " + this);
+            } catch (InterruptedException e) {
+                System.out.println("Sleep interruptered.");
+                e.printStackTrace();
+            }
+        }
+    }
+
+    public static void main(String[] args) throws Exception {
+        for (int i = 0; i < 5; i++) {
+           Thread daemonThread = new Thread(new DaemonThread());
+           daemonThread.setDaemon(true);
+           daemonThread.start();
+        }
+        System.out.println("All daemons started.");
+        Thread.sleep(200L);	// 如果这里时间改短，会发现后台线程可能不会完全启动
+    }
+}
+// 执行结果
+All daemons started.
+Thread[Thread-1,5,main] DaemonThread@45f342d8
+Thread[Thread-0,5,main] DaemonThread@994e424
+Thread[Thread-2,5,main] DaemonThread@2d58251c
+Thread[Thread-4,5,main] DaemonThread@45194fb9
+Thread[Thread-3,5,main] DaemonThread@6bf344b9
+```
+
+通过创建后台线程工厂，将线程工厂作为入参传给Executor创建后台线程。代码示例：
+
+```java
+public class DaemonThreadExecutor {
+    // 后台线程工厂
+    public static class DaemonThreadFactory implements ThreadFactory {
+        @Override
+        public Thread newThread(Runnable r) {
+            Thread t = new Thread(r);
+            t.setDaemon(true);
+            return t;
+        }
+    }
+
+    public static class RunnableR implements Runnable {
+        @Override
+        public void run() {
+            try {
+                Thread.sleep(100L);
+                System.out.println(Thread.currentThread() + " " + this);
+            } catch (InterruptedException e) {
+                System.out.println("Interrupted");
+            }
+        }
+    }
+
+    public static void main(String[] args) throws InterruptedException {
+        ExecutorService execService = Executors.newCachedThreadPool(
+                new DaemonThreadFactory());
+        for (int i = 0; i < 5; i++) {
+            execService.execute(new RunnableR());
+        }
+        System.out.println("All daemons started");
+        Thread.sleep(400L);// 如果这里时间改短，会发现后台线程可能不会完全启动
+    }
+}
+```
+
+由于传入了线程工厂，线程池的构造方法被重写了。源码如下：
+
+```java
+    public static ExecutorService newCachedThreadPool(ThreadFactory threadFactory) {
+        return new ThreadPoolExecutor(0, Integer.MAX_VALUE,
+                                      60L, TimeUnit.SECONDS,
+                                      new SynchronousQueue<Runnable>(),
+                                      threadFactory);
+    }
+```
+
+**可以通过调用`thread.isDaemon()`查看这个线程是不是后台线程。后台线程的所有子线程都是后台线程。**
+
+```java
+public class DaemonRun implements Runnable {
+    private Thread[] threads = new Thread[5];
+    @Override
+    public void run() {
+        for (int i = 0; i < threads.length; i++) {
+            threads[i] = new Thread(new RunnableR());
+            threads[i].start();
+        }
+        for (int i = 0; i < threads.length; i++) {
+            System.out.println("threads[" + i + "].isDaemon():" + threads[i].isDaemon());
+        }
+        while (true) {
+            Thread.yield();
+        }
+    }
+
+    static class RunnableR implements Runnable {
+        @Override
+        public void run() {
+            while (true) {
+                Thread.yield();
+            }
+        }
+    }
+
+    public static void main(String[] args) throws InterruptedException {
+        Thread t = new Thread(new DaemonRun());
+        t.setDaemon(true);
+        t.start();
+        TimeUnit.SECONDS.sleep(1L);
+    }
+}
+// 输出：
+threads[0].isDaemon():true
+threads[1].isDaemon():true
+threads[2].isDaemon():true
+threads[3].isDaemon():true
+threads[4].isDaemon():true
+```
+
+**在其他线程结束后，JVM会立即退出后台线程，不会执行`finall`字句里面的代码。**
+
+```java
+public class DaemonFinally {
+    public static class RunnableR implements Runnable {
+        @Override
+        public void run() {
+            try {
+                System.out.println("Runnable run");
+                Thread.sleep(100L);
+            } catch (InterruptedException e) {
+                System.out.println("Be interrupted");
+            } finally {
+                System.out.println("This should always execute.");
+            }
+        }
+    }
+
+    public static void main(String[] args) {
+        Thread t = new Thread(new RunnableR());
+        t.setDaemon(true);  // 如果把这行去掉，就会执行finally里面的字句
+        t.start();
+        System.out.println("Main execute finished");
+    }
+}
+// 输出：
+Main execute finished
+Runnable run
+```
 
