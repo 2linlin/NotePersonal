@@ -477,3 +477,79 @@ Main execute finished
 Runnable run
 ```
 
+##### 2.9 thread.join()方法
+
+在ta线程中调用`tb.join()`，则a线程要等b线程结束(`tb.isAlive() == false`)才会继续往下执行。                                                                                                                                                                                                                                          
+
+也可以带超时参数，`tb.join(1000L)`，1秒还没结束的话，`tb.join()`方法也会返回。
+
+`tb.join()`方法可以被中断，直接调用`tb.interrupt()`就行。
+
+代码示例：
+
+```java
+public class ThreadJoin {
+    public static class Joiner extends Thread {
+        private int sleepTime;
+
+        public Joiner(String threadName, int sleepTime) {
+            super(threadName);
+            this.sleepTime = sleepTime;
+            this.start();
+        }
+
+        @Override
+        public void run() {
+            try {
+                Thread.sleep(sleepTime);
+            } catch (InterruptedException e) {
+                System.out.println(this.getName() + " was interrupted! "
+                + "isInterrupted(): " + this.isInterrupted());
+            }
+            System.out.println(this.getName() + " was awakened!");
+        }
+    }
+
+    public static class ThreadT extends Thread {
+        private Joiner joiner;
+
+        public ThreadT(String threadName, Joiner joiner) {
+            super(threadName);
+            this.joiner = joiner;
+            this.start();
+        }
+
+        @Override
+        public void run() {
+            try {
+                joiner.join();
+            } catch (InterruptedException e) {
+                System.out.println(this.getName() + " was interrupted! "
+                        + "isInterrupted(): " + this.isInterrupted());
+            }
+            System.out.println(this.getName() + " was complete!");
+        }
+    }
+
+    public static void main(String[] args) {
+        Joiner joinerA = new Joiner("joinerA", 1500);
+        Joiner joinerB = new Joiner("joinerB", 5000);
+        ThreadT ta = new ThreadT("ta", joinerA);
+        ThreadT tb = new ThreadT("tb", joinerB);
+        joinerA.interrupt();
+        tb.interrupt();
+        System.out.println("main finished!");
+    }
+}
+// 结果
+main finished!
+joinerA was interrupted! isInterrupted(): false
+joinerA was awakened!
+ta was complete!
+tb was interrupted! isInterrupted(): false
+tb was complete!
+joinerB was awakened!     // 5秒后显示
+```
+
+注意一个小细节，调用了`tb.interrupt()`，`tb`继续往下走，但是`joinerB`并没有被中断，也是自己继续执行。
+
