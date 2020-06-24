@@ -61,7 +61,34 @@ public class DemoWebController {
 
 ### 集成Mybatis+Pagehelper
 
-知识点
+pom
+
+```xml
+<dependency>
+    <groupId>org.mybatis.spring.boot</groupId>
+    <artifactId>mybatis-spring-boot-starter</artifactId>
+</dependency>
+
+<dependency>
+    <groupId>mysql</groupId>
+    <artifactId>mysql-connector-java</artifactId>
+</dependency>
+```
+
+application.yml
+
+```yml
+spring:
+  datasource:
+    url: ${cdm_app_db_url:jdbc:mysql:///test01?useUnicode=true&characterEncoding=utf-8}
+    username: ${cdm_app_db_username:root}
+    password: ${cdm_app_db_password:root}
+    # type=com.alibaba.druid.pool.DruidDataSource
+```
+
+配置扫描路径
+
+使用测试
 
 
 
