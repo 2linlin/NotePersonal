@@ -248,7 +248,117 @@ public class MybatisAutoConfiguration implements InitializingBean {
 
 从类上的注解可以看出，当当前类路径下存在SqlSessionFactory、 SqlSessionFactoryBean以及DataSource时，这里的配置才会生效，SqlSessionFactory和SqlTemplate都被提供了。后面的多数据源配置会涉及到这里的内容。
 
-### 集成Pagehelper
+### 集成tk-mybatis
+
+整体步骤：
+
+```txt
+1.配置pom引入maven依赖
+2.启动类XXXApplication.java或自定义Mybatis配置类上，使用tkMybatis的@MapperScan扫描Mapper接口
+3.在application.yml文件中配置mapper.xml文件地址[可选]，自定义的SQL可以写在这些文件中
+4.配置实体类注解，如@Table,@Id等
+5.Mapper接口继承tkMybatis的Mapper接口
+6.使用tkMybatis即可
+```
+
+#### 1.配置pom.xml
+
+```xml
+<dependency>
+    <groupId>tk.mybatis</groupId>
+    <artifactId>mapper-spring-boot-starter</artifactId>
+    <version>2.0.2</version>
+</dependency>
+```
+
+#### 2.更换@MapperScan接口扫码注解
+
+把原来Mybatis的@MapperScan注解替换为tkMybatis的@MapperScan注解
+
+```java
+@SpringBootApplication
+@MapperScan(basePackages = "com.rainbowdemo.service.basic.systemmana.mapper")
+public class SystemmanaApplication {
+    public static void main(String[] args) {
+        SpringApplication.run(SystemmanaApplication.class);
+    }
+}
+```
+
+#### 3.配置Mapper.xml路径
+
+需要写自定义的SQL的话就配下。直接用Mybatis原来的配置就行，不用改。用法就是原生的Mybatis用法不变。
+
+```yml
+mybatis:
+  mapper-locations: classpath*:com/rainbowdemo/service/basic/systemmana/mapper/mybatis/**/*.xml
+```
+
+#### 4.配置实体类注解
+
+主要是表注解`@Table`和字段注解`@Column`，属于`javax.persistence`包。操作SQL时会自动进行驼峰和蛇形命名法的转换，如果驼峰名称自动转换后格式可以匹配数据库的蛇形命名的话，就无需加这两个注解。如下，字段名可以对应，因此无需用注解。
+
+```java
+@Data
+@Table(name = "t_syst_user")  // 用于tkMybatis
+public class User {
+//    @Id
+//    @Column(name = "user_id")
+    private Long userId;
+//    @Column(name = "user_name")
+    private String userName;
+//    @Column(name = "nick_name")
+    private String nickName;
+//    @Column(name = "password")
+    private String password;
+//    @Column(name = "create_user")
+    private Long createUser;
+//    @Column(name = "update_user")
+    private Long updateUser;
+//    @Column(name = "remark")
+    private String remark;
+//    @Column(name = "delete_flag")
+    private Byte deleteFlag;
+}
+```
+
+#### 5.Mapper接口继承tk的Mapper接口
+
+```java
+public interface UserMapper extends tk.mybatis.mapper.common.Mapper<User> {
+    String selectUserNameByUserId(Long userId);
+}
+```
+
+#### 6.使用示例
+
+```java
+@Service
+public class DemoWebService {
+    @Resource
+    private UserMapper userMapper;
+	
+    // 自定义方式
+    public String selectUserNameByUserId(Req<Long> req) {
+        return userMapper.selectUserNameByUserId(req.getBody());
+    }
+	
+    // tk方式
+    public User selectOneUserByUserId(Req<Long> req) {
+        User user = new User();
+        user.setUserId(req.getBody());
+        return userMapper.selectOne(user);
+    }
+}
+```
+
+
+
+### Pagehelper
+
+
+
+集成日志+事务管理
 
 
 
