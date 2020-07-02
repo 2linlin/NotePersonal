@@ -204,7 +204,7 @@ mybatis:
 
 #### 5.其他
 
-在SSM整合中，开发者需要自己提供两个Bean，一个`SqlSessionFactoryBean`，还有一个是`MapperScannerConfigurer`，在Spring Boot中，这两个东西虽然不用开发者自己提供了，但是并不意味着这两个Bean不需要了，在`org.mybatis.spring.boot.autoconfigure.MybatisAutoConfiguration`类中，我们可以看到Spring Boot提供了这两个Bean，部分源码如下：
+在SSM整合中，开发者需要自己提供两个Bean，一个`SqlSessionFactory`，还有一个是`MapperScannerConfigurer`，在Spring Boot中，这两个东西虽然不用开发者自己提供了，但是并不意味着这两个Bean不需要了，在`org.mybatis.spring.boot.autoconfigure.MybatisAutoConfiguration`类中，我们可以看到Spring Boot提供了这两个Bean，部分源码如下：
 
 ```java
 @org.springframework.context.annotation.Configuration
@@ -352,17 +352,27 @@ public class DemoWebService {
 }
 ```
 
+### 集成自定义配置+自动配置+多数据源
+
+测试目标：从A库读出数据，把数据写入B库。
+
+主要思路：自己初始化数据源的`SqlSessionFactoryBean`和`MapperScannerConfigurer`，注入多个数据源。数据源的配置可以从自定义的属性获取，每个数据源配置好扫码的mapper接口路径及xml路径即可。
+
+我们知道，在传统的SSM集成中，集成Mybatis的时候，需要我们提供两个Bean，一个`SqlSessionFactoryBean`，还有一个是`MapperScannerConfigurer`。Spring Boot在检测到没有这两个Bean的时候，会自动为我们配置(@ConditionalOnMissingBean，参见集成Mybatis部分讲解)。现在我们要集成多个数据源，那么就需要数据源相关的初始化工作可以由我们自己来把控。也就是这两个Bean的初始化及注入需要我们自己来完成。自己的Bean注入之后，mybatis-stater就会取消自动注入。
+
+整个数据源的自动配置可以参考mybatis-spring-boot-autoconfigure的实现。
+
+#### 1.自定义配置+自动配置
 
 
-### Pagehelper
 
 
 
-集成日志+事务管理
+### 集成Pagehelper+日志+事务管理
 
 
 
-### 集成多数据源
+### 集成Sharding-jdbc
 
 
 
@@ -414,7 +424,7 @@ public class DemoWebService {
 
 
 
-### 集成分布式事务
+### 集成分布式事务seata
 
 
 
@@ -446,7 +456,9 @@ public class DemoWebService {
 
 #### 分库分表
 
-可参考资料：[这里](http://springboot.javaboy.org/2019/0407/springboot-mybatis)
+增加mybatis-plus
+
+实践参考资料：[这里](http://springboot.javaboy.org/2019/0407/springboot-mybatis)
 
 
 
