@@ -354,7 +354,7 @@ public class DemoWebService {
 
 ### 集成自定义配置+自动配置+多数据源
 
-测试目标：从A库读出数据，把数据写入B库。
+测试目标：同一个服务中，从A库读出数据，再从B库读出数据。多数据源的集成也是为之后的合并部署做准备。
 
 主要思路：自己初始化数据源的`SqlSessionFactoryBean`和`MapperScannerConfigurer`，注入多个数据源。数据源的配置可以从自定义的属性获取，每个数据源配置好扫码的mapper接口路径及xml路径即可。
 
@@ -362,9 +362,376 @@ public class DemoWebService {
 
 整个数据源的自动配置可以参考mybatis-spring-boot-autoconfigure的实现。
 
-#### 1.自定义配置+自动配置
+#### 1.自定义配置
+
+```java
+// ---------------------------------
+@Configuration
+@EnableConfigurationProperties({RbowDatasourceProperties.class})
+public class RbowDatasourceAutoConfig {...}
+// ---------------------------------
+@Getter
+@Setter
+@ConfigurationProperties(prefix="rbow")
+public class RbowDatasourceProperties {
+    // 多数据源配置
+    private Map<String, RbowSingleDatasourceProperties> datasources;
+}
+// ---------------------------------
+public class RbowSingleDatasourceProperties {
+    // jdbc驱动类名称，默认com.mysql.cj.jdbc.Driver
+    private String driverClassName = RbowDatasourceConstant.DEFAULT_DRIVER_NAME;
+    // jdbc的url
+    private String jdbcurl;
+    // 数据库用户名
+    private String username;
+    // 数据库密码
+    private String password;
+    // mapper接口扫描包路径。如com.xx.xxx
+    private String mapperInterfaceLocation;
+    // mapper.xml扫描文件路径。如classpath*:com/xxx/mapper/**/*Mapper.xml
+    private String mapperXmlLocation;
+    // 事务控制所在的顶层包名，多个包用英文逗号隔开。如com.xx.xxx
+    // private String transactionBasePackages;
+
+    // =========================== Hikari连接池参数 ========================
+    // 获取连接超时时间，默认30s
+    private long connectionTimeout = 30000;
+    // 验证一次数据库连接池连接是否为null的时间 默认3s
+    private long validationTimeout = 3000;
+    // 连接池最大连接（包括空闲和正在使用的连接）默认最大200
+    private int maximumPoolSize = 200;
+    // 连接池最小连接（包括空闲和正在使用的连接）默认最小10
+    private int minimumIdle = 10;
+    // 连接空闲时间。该设置仅适用于minimumIdle设置为小于maximumPoolSize的情况 默认:60000(1分钟)
+    private long idleTimeout = 60000;
+    // 一个连接的生命时长（毫秒），超时而且没被使用则被释放（retired），缺省:10分钟
+    private long maxLifetime = 600000;
+}
+// ---------------------------------yml配置：
+rbow:
+  datasources:
+    systemmana:
+      jdbcurl: ${cdm_app_db_url:jdbc:mysql://rainbowdemo.com:33306/rbdm_syst?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai}
+      username: ${cdm_app_db_username:root}
+      password: ${cdm_app_db_password:123456}
+      mapper-interface-location: com.rainbowdemo.service.basic.systemmana.mapper
+      mapper-xml-location: classpath*:com/rainbowdemo/service/basic/systemmana/mapper/mybatis/**/*.xml
+#      transaction-base-packages: asd
+    systemmana_bk: # 备份数据源，用于测试多数据源注入
+      jdbcurl: ${cdm_app_db_url:jdbc:mysql://rainbowdemo.com:33306/rbdm_syst_ds2bk?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai}
+      username: ${cdm_app_db_username:root}
+      password: ${cdm_app_db_password:123456}
+      mapper-interface-location: com.rainbowdemo.service.basic.systemmana.mapperbk
+      mapper-xml-location: classpath*:com/rainbowdemo/service/basic/systemmana/mapperbk/mybatis/**/*.xml
+```
+
+#### 2.自动配置+多数据源注入
+
+使用`@EnableAutoConfiguration`允许自动配置
+
+```java
+// 注意，我取消了jdbc.DataSourceAutoConfiguration的自动注入。后面改成了自己注入数据源，所以不需要这个。
+@SpringBootApplication
+@EnableAutoConfiguration(excludeName = "org.springframework.boot.autoconfigure.jdbc.DataSourceAutoConfiguration")
+public class SystemmanaApplication {
+    public static void main(String[] args) {
+        SpringApplication.run(SystemmanaApplication.class);
+    }
+}
+```
+
+在spring.factories指明自动配置类
+
+```properties
+org.springframework.boot.autoconfigure.EnableAutoConfiguration=\
+com.rainbow.starter.mybatis.autoconfig.RbowDatasourceAutoConfig
+```
+
+以下用了@Import，BeanDefinitionRegistry.registerBeanDefinition()两种注入方式。
+
+自动配置类RbowDatasourceAutoConfig：
+
+```java
+/**
+ * @Desc 数据源相关的自动配置入口
+ *
+ * 功能：完成Bean的初始化工作：RbowDatasourceInitInvoker, RbowDatasourceInitPostProcessor,
+ *      Datasource, SqlSessionFactoryBean, MapperScannerConfigurer(tk的)
+ * 初始化顺序：
+ * 1.ImportBeanDefinitionRegistrar 接口为入口，在该接口的方法中手动注入RbowDatasourceInitPostProcessor的Bean
+ *   。对应下面的@Import({RbowDatasourceAutoConfig.RegistPostProcessor.class})
+ * 2.RbowDatasourceInitPostProcessor的Bean实现BeanPostProcessor接口，该接口的
+ *   postProcessAfterInitialization方法监听容器Bean注入情况，监听ProxyTransactionManagementConfiguration注入
+ * 3.本类的@EnableTransactionManagement注解触发ProxyTransactionManagementConfiguration注入
+ * 4.监听到ProxyTransactionManagementConfiguration的Bean注入后，在监听的方法中实现RbowDatasourceInitInvoker这
+ *   个Bean的初始化。对应下面的@Import({RbowDatasourceInitInvoker.RegistPostProcessor.class})
+ * 5.RbowDatasourceInitInvoker的初始化触发数据源的注入及初始化
+ * 6.数据源直接根据配置生成注入
+ * 7.SqlSessionFactoryBean根据配置生成后，使用beanFactory手动注入
+ * 8.MapperScannerConfigurer的Bean使用beanFactory无效，需要手动使用BeanDefinitionRegistry方式注入
+ * 9.多数据源注入，beanName一样时，需要手动生成Bean名称。手动增加了UniqueBeanNameGenerator。
+ *
+ * 总体流程：
+ * -> @Import({RbowDatasourceAutoConfig.RegistPostProcessor.class})完成注入，入口
+ * -> RbowDatasourceInitPostProcessor.class完成注入，并监听ProxyTransactionManagementConfiguration
+ * -> @Import({RbowDatasourceInitInvoker.class})
+ * -> @EnableTransactionManagement，触发ProxyTransactionManagementConfiguration，从而触发RbowDatasourceInitInvoker.class初始化
+ * -> 数据源注入
+ * -> 配套的SqlSessionFactoryBean注入
+ * -> 配套的MapperScannerConfigurer注入
+ * -> 有多个数据源则循环多次
+ *
+ */
+@Configuration
+@EnableConfigurationProperties({RbowDatasourceProperties.class})
+@Import({RbowDatasourceInitInvoker.class, RbowDatasourceAutoConfig.RegistPostProcessor.class})
+@EnableTransactionManagement
+public class RbowDatasourceAutoConfig {
+//    @Bean
+//    public InitTransactionalValue initTransactionalValue() {
+//        return new InitTransactionalValue();
+//    }
+
+    // 注入RbowDatasourceInitPostProcessor
+    public static class RegistPostProcessor implements ImportBeanDefinitionRegistrar {
+        private static final String REGIST_BEAN_NAME = RbowDatasourceInitPostProcessor.class.getSimpleName();
+
+        // 用于后续MapperScannerConfigurer的Bean注入
+        @Getter
+        private static BeanDefinitionRegistry registry;
+
+        @Override
+        public void registerBeanDefinitions(AnnotationMetadata importingClassMetadata,
+                                            BeanDefinitionRegistry registry) {
+            if (registry.containsBeanDefinition(REGIST_BEAN_NAME)) {
+                return;
+            }
+
+            RegistPostProcessor.registry = registry;    // 用于后续MapperScannerConfigurer的Bean注入
+
+            // 注入RbowDatasourceInitPostProcessor
+            GenericBeanDefinition beanDef = new GenericBeanDefinition();
+            beanDef.setBeanClass(RbowDatasourceInitPostProcessor.class);
+//            beanDef.setRole();??
+            beanDef.setSynthetic(true); // 标记为由程序注入
+            registry.registerBeanDefinition(REGIST_BEAN_NAME, beanDef);
+        }
+    }
+}
+```
+
+RbowDatasourceInitPostProcessor，触发RbowDatasourceInitInvoker的初始化:
+
+```java
+/**
+ * @Desc RbowDatasourceInitInvoker初始化
+ *   由@EnableTransactionManagement触发ProxyTransactionManagementConfiguration
+ *   从而触发RbowDatasourceInitInvoker的初始化
+ */
+public class RbowDatasourceInitPostProcessor implements BeanPostProcessor, Ordered {
+    @Resource
+    private BeanFactory beanFactory;
+
+    @Override
+    public int getOrder() {
+        return 0;
+    }
+
+    @Override
+    public Object postProcessAfterInitialization(Object bean, String beanName) throws BeansException {
+        // ProxyTransactionManagementConfiguration的Bean由@Configuration类的@EnableTransactionManagement触发
+        // 该Bean注入要早于dispatcherServlet
+        if (bean instanceof ProxyTransactionManagementConfiguration) {
+            // force initialization of this bean as soon as we see a
+            // ProxyTransactionManagementConfiguration
+            beanFactory.getBean(RbowDatasourceInitInvoker.class);
+        }
+        return bean;
+    }
+}
+```
+
+多数据源初始化（SqlSessionFactoryBean注入，MapperScannerConfigurer注入）：
+
+```java
+/**
+ * @Desc 数据源配置初始化
+ */
+@Slf4j
+public class RbowDatasourceInitInvoker extends AbstractDatasourceInitInvoker {
+
+    public RbowDatasourceInitInvoker(final ConfigurableBeanFactory beanFactory,
+                                     final RbowDatasourceProperties rbowDatasourceProperties) {
+        // 初始化逻辑在抽象类里
+        super(beanFactory, rbowDatasourceProperties);
+    }
+
+    @Override
+    protected String initSqlSessionFactory(String dsName, DataSource ds, RbowSingleDatasourceProperties dsProp) {
+        // 1.生成Bean
+        SqlSessionFactoryBean fcBean = new SqlSessionFactoryBean();
+        fcBean.setDataSource(ds);
+
+        PathMatchingResourcePatternResolver resolver = new PathMatchingResourcePatternResolver();
+        try {
+            fcBean.setMapperLocations(resolver.getResources(dsProp.getMapperXmlLocation()));
+        } catch (IOException e) {
+            e.printStackTrace();
+            log.error(e.getMessage(), e);
+        }
+
+        // 2.注册Bean
+        String sqlSessionFactoryBeanName = super.addSuffixBeanClassName(
+                dsName, RbowDatasourceConstant.SQL_SESSION_FACTORY_BEAN_NAME_SUFFIX);
+        super.registerBean(sqlSessionFactoryBeanName, fcBean);
+        return sqlSessionFactoryBeanName;
+    }
+
+    // 注意：因为使用了tk，注入的是tk的MapperScannerConfigurer
+    @Override
+    protected void initMapperScannerConfigurer(
+            String dsName, String sqlSessionFactoryBeanName, RbowSingleDatasourceProperties dsProp) {
+        // 1.生成Bean
+        MapperScannerConfigurer scanConf = new MapperScannerConfigurer();
+        // 1.1 配置tk特有的属性
+        Properties prop = new Properties();
+        prop.setProperty("IDENTITY", "MYSQL");
+        prop.setProperty("notEmpty", "true");
+        prop.setProperty("safeUpdate", "true");
+        scanConf.setProperties(prop);
+        // 1.2 配置其他特性
+        scanConf.setSqlSessionFactoryBeanName(sqlSessionFactoryBeanName);
+        scanConf.setBasePackage(dsProp.getMapperInterfaceLocation());
+        scanConf.setNameGenerator(new UniqueBeanNameGenerator()); // 避免多数据源bean名称冲突
+
+        // 2.注册Bean
+        String scanConfBeanName = super.addSuffixBeanClassName(
+                dsName, MapperScannerConfigurer.class.getSimpleName());
+        // super.registerBean(scanConfBeanName, scanConf);
+        // registerBean失效，必须采用postProcessBeanDefinitionRegistry注入
+        scanConf.postProcessBeanDefinitionRegistry(RbowDatasourceAutoConfig.RegistPostProcessor.getRegistry());
+    }
+}
+```
+
+多数据源初始化（数据源注入）：
+
+```java
+/**
+ * @Desc 数据源初始化，抽象类
+ */
+public abstract class AbstractDatasourceInitInvoker {
+     private final ConfigurableBeanFactory beanFactory;
+
+    // 在构造方法中初始化。加载Bean时即可自动执行。且自动获取入参的Bean。
+    public AbstractDatasourceInitInvoker(final ConfigurableBeanFactory beanFactory,
+             final RbowDatasourceProperties rbowDatasourceProperties) {
+        this.beanFactory = beanFactory;
+        this.injectDataSources(rbowDatasourceProperties);
+    }
+
+    // 把全部的数据源都进行注入到容器
+    private void injectDataSources(RbowDatasourceProperties rbowDatasourceProperties) {
+        // 1.多数据源配置校验
+        this.validDatasourceProperties(rbowDatasourceProperties);
+
+        // 2.根据多数据源配置将多数据源Bean注册至容器
+        this.registDatasources(rbowDatasourceProperties);
+    }
+
+    // 多数据源配置校验
+    private void validDatasourceProperties(RbowDatasourceProperties rbowDatasourceProperties) {
+        // 1.入参不可为空
+        Map<String, RbowSingleDatasourceProperties> dsProps = rbowDatasourceProperties.getDatasources();
+        if (CollectionUtils.isEmpty(dsProps)) {
+            throw new IllegalStateException("rbow.datasources未配置！");
+        }
+
+        // 2.各数据源的各个属性不可为空
+        for (Map.Entry<String, RbowSingleDatasourceProperties> dsProp : dsProps.entrySet()) {
+            RbowSingleDatasourceProperties properties = dsProp.getValue();
+
+            boolean isAnyBlank = StringUtils.isEmpty(properties.getDriverClassName())
+                    || StringUtils.isEmpty(properties.getJdbcurl())
+                    || StringUtils.isEmpty(properties.getUsername())
+                    || StringUtils.isEmpty(properties.getPassword())
+                    || StringUtils.isEmpty(properties.getMapperInterfaceLocation())
+                    || StringUtils.isEmpty(properties.getMapperXmlLocation());
+            Assert.state(!isAnyBlank,
+                    RbowSingleDatasourceProperties.class.getCanonicalName()+"attriutes未配置");
+        }
+    }
+
+    // 根据多数据源配置将多数据源Bean注册至容器
+    private void registDatasources(RbowDatasourceProperties rbowDatasourceProperties) {
+        Map<String, RbowSingleDatasourceProperties> dsProps = rbowDatasourceProperties.getDatasources();
+
+        dsProps.forEach((dsName, dsProp) -> {
+            // 生成数据源
+            DataSource ds = this.createDatasource(dsProp);
+            // 注册数据源
+            this.registDatasource(dsName, ds);
+            // 初始化数据源。如：注入SqlSessionFactory和MapperScannerConfigurer等
+            this.initDataSource(dsName, ds, dsProp);
+        });
+    }
+
+    private DataSource createDatasource(RbowSingleDatasourceProperties properties) {
+        return createHikariDataSource(properties);
+    }
+
+    private DataSource createHikariDataSource(RbowSingleDatasourceProperties dsProp) {
+        HikariDataSource hds = new HikariDataSource();
+        hds.setDriverClassName(dsProp.getDriverClassName());
+        hds.setJdbcUrl(dsProp.getJdbcurl());
+        hds.setUsername(dsProp.getUsername());
+        hds.setPassword(dsProp.getPassword());
+        //Hikari连接池其他配置
+        hds.setConnectionTimeout(dsProp.getConnectionTimeout());
+        hds.setValidationTimeout(dsProp.getValidationTimeout());
+        hds.setIdleTimeout(dsProp.getIdleTimeout());
+        hds.setMaxLifetime(dsProp.getMaxLifetime());
+        hds.setMaximumPoolSize(dsProp.getMaximumPoolSize());
+        hds.setMinimumIdle(dsProp.getMinimumIdle());
+        return hds;
+    }
+
+    /**
+     * 注册数据源
+     * @param dsName 该数据源在application.yml配置中的名字
+     */
+    private void registDatasource(String dsName, DataSource ds) {
+        String dsBeanName = addSuffixBeanClassName(dsName, HikariDataSource.class.getSimpleName());
+        this.registerBean(dsBeanName, ds);
+    }
+
+    // 注册Bean
+    protected void registerBean(String beanName, Object singletonObject) {
+        beanFactory.registerSingleton(beanName, singletonObject);
+    }
+
+    // 拼接Bean名称
+    protected String addSuffixBeanClassName(String datasourceName, String beanClassName) {
+        return datasourceName + beanClassName;
+    }
 
 
+    // 初始化数据源。如：注入SqlSessionFactory和MapperScannerConfigurer等
+    private void initDataSource(String dsName, DataSource ds, RbowSingleDatasourceProperties dsProp) {
+        // 初始化SqlSessionFactory
+        String sqlSessionFactoryBeanName = initSqlSessionFactory(dsName, ds, dsProp);
+
+        // 初始化MapperScannerConfiguer
+        this.initMapperScannerConfigurer(dsName, sqlSessionFactoryBeanName, dsProp);
+    }
+
+    // 注册SqlSessionFactory，并返回SqlSessionFactory的Bean名称
+    protected abstract String initSqlSessionFactory(String dsName, DataSource ds, RbowSingleDatasourceProperties dsProp);
+
+    protected abstract void initMapperScannerConfigurer(String dsName, String sqlSessionFactoryBeanName, RbowSingleDatasourceProperties dsProp);
+}
+```
 
 
 
@@ -422,7 +789,7 @@ public class DemoWebService {
 
 ### 集成合并部署
 
-
+合并部署时会有多数据源问题，已经在前面解决。
 
 ### 集成分布式事务seata
 
@@ -450,17 +817,120 @@ public class DemoWebService {
 
 ### 其他
 
-#### 跨域问题
-
 #### 多数据源
 
 #### 分库分表
 
 增加mybatis-plus
 
-实践参考资料：[这里](http://springboot.javaboy.org/2019/0407/springboot-mybatis)
+实践参考资料：[这里 ](http://springboot.javaboy.org/2019/0407/springboot-mybatis)
 
+让微服务只允许网关直接访问
 
+#### 跨域问题
+
+app端集成：
+
+1.注入CorsWebFilter的Bean:
+
+```java
+ */
+@Configuration
+public class CorsConfig {
+
+    // 跨域第一步：关闭webFlux跨域
+    @Bean
+    public CorsWebFilter corsFilter() {
+        CorsConfiguration config = new CorsConfiguration();
+        config.addAllowedMethod("*");
+        config.addAllowedOrigin("*");
+        config.addAllowedHeader("*");
+
+        UrlBasedCorsConfigurationSource source = new UrlBasedCorsConfigurationSource();
+        source.registerCorsConfiguration("/**", config);
+
+        return new CorsWebFilter(source);
+    }
+}
+```
+
+2.注入WebMvcConfigurer配置Bean
+
+```java
+@Configuration
+public class CrossConfig implements WebMvcConfigurer {
+    @Override
+    public void addCorsMappings(CorsRegistry registry) {
+        registry.addMapping("/**")
+                .allowedOrigins("*")
+                .allowedMethods("GET","HEAD","POST","PUT","DELETE","OPTIONS")
+                .allowCredentials(true)
+                .maxAge(3600)
+                .allowedHeaders("*");
+    }
+}
+```
+
+网关端spring-cloud-gateway集成：
+
+1.注入CorsWebFilter的Bean:
+
+```java
+ */
+@Configuration
+public class CorsConfig {
+
+    // 跨域第一步：关闭webFlux跨域
+    @Bean
+    public CorsWebFilter corsFilter() {
+        CorsConfiguration config = new CorsConfiguration();
+        config.addAllowedMethod("*");
+        config.addAllowedOrigin("*");
+        config.addAllowedHeader("*");
+
+        UrlBasedCorsConfigurationSource source = new UrlBasedCorsConfigurationSource();
+        source.registerCorsConfiguration("/**", config);
+
+        return new CorsWebFilter(source);
+    }
+}
+```
+
+2.注入Filter
+
+```java
+public class CrossOriginFilter implements GlobalFilter, Ordered {
+    private static final String ALL = "*";
+    private static final String MAX_AGE = "18000L";
+
+    // 跨域第二步：全局跨域Filter
+    @Override
+    public Mono<Void> filter(ServerWebExchange serverWebExchange, GatewayFilterChain gatewayFilterChain) {
+        ServerHttpRequest request = serverWebExchange.getRequest();
+//        if (!CorsUtils.isCorsRequest(request)) {
+//            return gatewayFilterChain.filter(serverWebExchange);
+//        }
+        ServerHttpResponse response = serverWebExchange.getResponse();
+        HttpHeaders headers = response.getHeaders();
+        headers.add(HttpHeaders.ACCESS_CONTROL_ALLOW_ORIGIN, "*");
+        headers.add(HttpHeaders.ACCESS_CONTROL_ALLOW_METHODS, "POST, GET, PUT, OPTIONS, DELETE, PATCH");
+        headers.add(HttpHeaders.ACCESS_CONTROL_ALLOW_CREDENTIALS, "true");
+        headers.add(HttpHeaders.ACCESS_CONTROL_ALLOW_HEADERS, "*");
+        headers.add(HttpHeaders.ACCESS_CONTROL_EXPOSE_HEADERS, ALL);
+        headers.add(HttpHeaders.ACCESS_CONTROL_MAX_AGE, MAX_AGE);
+        if (request.getMethod() == HttpMethod.OPTIONS) {
+            response.setStatusCode(HttpStatus.OK);
+            return Mono.empty();
+        }
+        return gatewayFilterChain.filter(serverWebExchange);
+    }
+
+    @Override
+    public int getOrder() {
+        return -300;
+    }
+}
+```
 
 
 

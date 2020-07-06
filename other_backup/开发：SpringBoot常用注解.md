@@ -386,6 +386,63 @@ public class WindDatasourceAutoConfiguration {
 > 1）ImportSelector 该接口的方法的返回值都会被纳入到spring容器管理中
 > 2）SpringFactoriesLoader 该类可以从classpath中搜索所有META-INF/spring.factories配置文件，并读取配置
 
+### ImportBeanDefinitionRegistrar注入Bean
+
+#### 场景
+
+集成mybatis的多数据源时，取消了spring的数据源自动注入，改为注入自己配置的数据源。此时发现自己配置的数据源注入的优先级低于@Service注解的Bean。导致在serviceBean注入mapperBean时报错。如下：
+
+取消了spring的数据源自动注入：
+
+```java
+@EnableAutoConfiguration(excludeName = "org.springframework.boot.autoconfigure.jdbc.DataSourceAutoConfiguration")
+public class SystemmanaApplication {...}
+```
+
+自己用@Configuration和@Import注入数据源：
+
+```java
+@Configuration
+@EnableConfigurationProperties({RbowDatasourceProperties.class})
+@Import({RbowDatasourceInitInvoker.class})
+public class RbowDatasourceAutoConfig {...}
+```
+
+发现数据源无法先与ServiceBean注入。
+
+#### 解决方案
+
+使用`ImportBeanDefinitionRegistrar.class`初始化数据源的注入。
+
+```java
+@Configuration
+@EnableConfigurationProperties({RbowDatasourceProperties.class})
+@Import({RbowDatasourceInitInvoker.class, RbowDatasourceAutoConfig.RegistPostProcessor.class})
+public class RbowDatasourceAutoConfig {
+    // 注入RbowDatasourceInitPostProcessor
+    public static class RegistPostProcessor implements ImportBeanDefinitionRegistrar {
+        @Override
+        public void registerBeanDefinitions(AnnotationMetadata importingClassMetadata,
+                                            BeanDefinitionRegistry registry) {
+            //注入数据源RbowDatasourceInitInvoker...
+        }
+    }
+```
+
+#### [原理分析](https://www.cnblogs.com/secbro/p/11991641.html)
+
+**Spring官方通过ImportBeanDefinitionRegistrar实现了@Component、@Service等注解的动态注入机制。**
+
+很多三方框架集成Spring的时候，都会通过该接口，实现扫描指定的类，然后注册到spring容器中。 比如Mybatis中的Mapper接口，springCloud中的FeignClient接口，都是通过该接口实现的自定义注册逻辑。
+
+所有实现了该接口的类的都会被ConfigurationClassPostProcessor处理，ConfigurationClassPostProcessor实现了BeanFactoryPostProcessor接口，所以ImportBeanDefinitionRegistrar中动态注册的bean是优先于依赖其的bean初始化，也能被aop、validator等机制处理。
+
+基本步骤：
+
+- 实现ImportBeanDefinitionRegistrar接口；
+- 通过registerBeanDefinitions实现具体的类初始化；
+- 在@Configuration注解的配置类上使用@Import导入实现类；
+
 
 
 ### 其他常用
@@ -399,3 +456,6 @@ public class WindDatasourceAutoConfiguration {
 
 
 ```
+
+
+
