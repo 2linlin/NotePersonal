@@ -248,6 +248,14 @@ public class MybatisAutoConfiguration implements InitializingBean {
 
 从类上的注解可以看出，当当前类路径下存在SqlSessionFactory、 SqlSessionFactoryBean以及DataSource时，这里的配置才会生效，SqlSessionFactory和SqlTemplate都被提供了。后面的多数据源配置会涉及到这里的内容。
 
+#### 6.扩展：Mybatis整合总体思路
+
+```txt
+1.利用配置文件生成数据源DateSource，并把数据源注册到Spring 
+2.把数据源set到SqlSessionFactoryBean，并把这个Bean注册到Spring。各种分页、自定义、日志等插件可以在这一步set到SqlSessionFactoryBean
+3.把数据源set到MapperScannerConfigurer，并把这个Bean注册到Spring。tk等改造可以通过继承MapperScannerConfigurer来实现。注册的时候直接用beanFactory注册可能会失效，可以用MapperScannerConfigurer::postProcessBeanDefinitionRegistry()来注册。
+```
+
 ### 集成tk-mybatis
 
 整体步骤：
@@ -352,7 +360,7 @@ public class DemoWebService {
 }
 ```
 
-### 集成自定义配置+自动配置+多数据源
+### 集成自定义配置+自动配置+Mybatis多数据源
 
 测试目标：同一个服务中，从A库读出数据，再从B库读出数据。多数据源的集成也是为之后的合并部署做准备。
 
@@ -733,9 +741,342 @@ public abstract class AbstractDatasourceInitInvoker {
 }
 ```
 
+### 集成Mybatis+Pagehelper
+
+把Pagehelper集成进Mybatis主要有以下几种方式：
+
+- 方式一：引用`pagehelper-spring-boot-starter`，然后直接在application.yml配置参数即可
+- 方式二：引用`pagehelper-spring-boot-starter`，然后在`@Configuration`的配置类下直接注入`PageHelper `的Bean
+- 方式三：仅仅引用`pagehelper`，然后把它作为插件在注入`sqlSessionFactoryBean`的时候设置到`sqlSessionFactoryBean`上即可
+
+以上三种方式，方式一、方式二没有亲自实践，仅供参考。本次集成采用了方式三的方式。
+
+#### [方式一](https://www.jb51.net/article/132232.htm)：官方starter+application.yml配置
+
+1.配置pom，是否全部jar包为必需没有验证。
+
+```xml
+<dependency>
+ <groupId>com.github.pagehelper</groupId>
+ <artifactId>pagehelper</artifactId>
+ <version>5.1.2</version>
+</dependency>
+<dependency>
+ <groupId>com.github.pagehelper</groupId>
+ <artifactId>pagehelper-spring-boot-autoconfigure</artifactId>
+ <version>1.2.3</version>
+</dependency>
+<dependency>
+ <groupId>com.github.pagehelper</groupId>
+ <artifactId>pagehelper-spring-boot-starter</artifactId>
+ <version>1.2.3</version>
+</dependency>
+```
+
+2.配置yml
+
+```yml
+pagehelper:
+ helperDialect: mysql
+ reasonable: true
+ supportMethodsArguments: true
+ params: count=countSql
+```
+
+#### [方式二](https://www.jb51.net/article/132232.htm)：官方starter+手动注入pagehelper的Bean
+
+1.配置pom，和方式一同样的代码。是否全部jar包为必需没有验证。
+
+```xml
+<dependency>
+ <groupId>com.github.pagehelper</groupId>
+ <artifactId>pagehelper</artifactId>
+ <version>5.1.2</version>
+</dependency>
+<dependency>
+ <groupId>com.github.pagehelper</groupId>
+ <artifactId>pagehelper-spring-boot-autoconfigure</artifactId>
+ <version>1.2.3</version>
+</dependency>
+<dependency>
+ <groupId>com.github.pagehelper</groupId>
+ <artifactId>pagehelper-spring-boot-starter</artifactId>
+ <version>1.2.3</version>
+</dependency>
+```
+
+2.手动注入Bean。在@Configuration或者@SpringBootApplication的类下都可以
+
+```java
+@Configuration
+public class PageHelperConfig {
+ 
+ @Bean
+ public PageHelper getPageHelper(){
+ PageHelper pageHelper=new PageHelper();
+ Properties properties=new Properties();
+ properties.setProperty("helperDialect","mysql");
+ properties.setProperty("reasonable","true");
+ properties.setProperty("supportMethodsArguments","true");
+ properties.setProperty("params","count=countSql");
+ pageHelper.setProperties(properties);
+ return pageHelper;
+ } 
+}
+```
+
+#### 方式三：把pagehelper作为插件配置到sqlSessionFactoryBean
+
+这个是我采用的方法。在注入`sqlSessionFactoryBean`的时候把`pageInterceptor`作为插件注入即可。PageInterceptor实现了mybatis的Interceptor接口。
+
+1.引入pom
+
+```xml
+<dependency>
+    <groupId>com.github.pagehelper</groupId>
+    <artifactId>pagehelper</artifactId>
+    <version>${pagehelper}</version>
+</dependency>
+```
+
+2.配置为mybatis插件
+
+```java
+protected void registerSqlSessionFactoryBean(String beanName, SingleDatasourceProperties dataSourceProperties, DataSource dataSource) {
+    // ...
+    SqlSessionFactoryBean sqlSessionFactoryBean = new SqlSessionFactoryBean();
+    sqlSessionFactoryBean.setDataSource(dataSource);
+    // ...
+    sqlSessionFactoryBean.setMapperLocations(mapperXmlLocationResources);
+    // ...
+    // 核心语句
+    sqlSessionFactoryBean.setPlugins(new Interceptor[] { mybatisSqlLogInterceptor, buildPageInterceptor() });
+    // 注册bean
+    registerBean(beanName, sqlSessionFactoryBean);
+}
+
+// 创建PageInterceptor。PageInterceptor实现了mybatis的Interceptor接口
+private PageInterceptor buildPageInterceptor() {
+    PageInterceptor pageHelper = new PageInterceptor();
+    Properties p = new Properties();
+    // 分页合理化参数
+    p.setProperty("reasonable", "true");
+    p.setProperty("supportMethodsArguments", "true");
+    p.setProperty("params", "count=countSql");
+    pageHelper.setProperties(p);
+    return pageHelper;
+}
+```
+
+#### 使用示例
+
+```java
+public Page<User> pageUser() {  
+    // ...
+    PageHelper.startPage(2,2);
+    Page<User> page = userMapper.pageAll();
+
+    log.info("Datas: "+JSON.toJSONString(page.getResult()));
+    log.info("PageCount: "+page.getPages()+"");
+    log.info("PageIndex: " +page.getPageNum()+"");
+    log.info("PageSize: "+page.getPageSize()+"");
+    log.info("TotalCount: "+page.getTotal()+"");
+    // ...
+}
+```
+
+### 集成Mybatis+日志
+
+本质上就是
+
+```txt
+1. 自己实现一个自定义的Mybatis插件。
+2. 然后set到SqlSessionFactoryBean。配置为SqlSessionFactoryBean的插件
+3. 把SqlSessionFactoryBean注册到ConfigurableBeanFactory即可。
+```
+
+1.日志插件
+
+```java
+@Intercepts({ @Signature(type = Executor.class, method = "update", args = { MappedStatement.class, Object.class }),
+        @Signature(type = Executor.class, method = "query", args = { MappedStatement.class, Object.class, RowBounds.class, ResultHandler.class }),
+        @Signature(type = Executor.class, method = "query", args = { MappedStatement.class, Object.class, RowBounds.class, ResultHandler.class, CacheKey.class, BoundSql.class }),
+        @Signature(type = Executor.class, method = "queryCursor", args = { MappedStatement.class, Object.class, RowBounds.class }) })
+@Slf4j
+
+public class MybatisSqlLogInterceptor implements Interceptor {
+    private static final String QUOTE = "\\?";
+
+    @Override
+    public Object intercept(Invocation invocation) throws Throwable {
+        Object returnValue = null;
+        long start = System.currentTimeMillis();    // SQL语句执行，计时开始
+        try {
+            returnValue = invocation.proceed();
+            return returnValue;
+        } finally {
+            long end = System.currentTimeMillis();    // SQL语句执行，计时结束
+            long executeTime = end - start;
+            // 原始SQL语句
+            MappedStatement mappedStatement = (MappedStatement)invocation.getArgs()[0];
+            BoundSql boundSql = null;
+            if (invocation.getArgs().length == 6) {
+                boundSql = (BoundSql) invocation.getArgs()[5];
+            } else {
+                Object parameter = invocation.getArgs()[1];
+                boundSql = mappedStatement.getBoundSql(parameter);
+            }
+            String sqlId = mappedStatement.getId();
+            Configuration configuration = mappedStatement.getConfiguration();
+            showSql(configuration, boundSql, sqlId, executeTime, returnValue);
+        }
+    }
+
+    private static void showSql(Configuration configuration, BoundSql boundSql, String sqlId, long time,
+                               Object returnValue) {
+        String separator = " ==> ";
+        String sql = getSql(configuration, boundSql);
+        StringBuilder str = new StringBuilder((sql.length() > 256) ? 256 : 64);
+        str.append(sqlId);
+        str.append("：");
+        str.append(sql);
+        str.append(separator);
+        str.append("spend：");
+        str.append(time);
+        str.append("ms");
+        str.append(separator);
+        str.append("result===>");
+        str.append(returnValue);
+
+        log.info(str.toString()/*LogUtil.truncate(str.toString())*/);   // TODO
+    }
+
+    private static String getSql(Configuration configuration, BoundSql boundSql) {
+        Object parameterObject = boundSql.getParameterObject();
+        List<ParameterMapping> parameterMappings = boundSql.getParameterMappings();
+
+        String sql = boundSql.getSql().replaceAll("[\\s]+", " ");
+        if (CollectionUtils.isEmpty(parameterMappings) || Objects.isNull(parameterObject)) {
+            return sql;
+        }
+
+        TypeHandlerRegistry typeHandlerRegistry = configuration.getTypeHandlerRegistry();
+        if (typeHandlerRegistry.hasTypeHandler(parameterObject.getClass())) {
+            sql = sql.replaceFirst(QUOTE, getParameterValue(parameterObject));
+        } else {
+            MetaObject metaObject = configuration.newMetaObject(parameterObject);
+            for (ParameterMapping parameterMapping : parameterMappings) {
+                String propertyName = parameterMapping.getProperty();
+                if (metaObject.hasGetter(propertyName)) {
+                    Object obj = metaObject.getValue(propertyName);
+                    sql = sql.replaceFirst(QUOTE, getParameterValue(obj));
+                } else if (boundSql.hasAdditionalParameter(propertyName)) {
+                    Object obj = boundSql.getAdditionalParameter(propertyName);
+                    sql = sql.replaceFirst(QUOTE, getParameterValue(obj));
+                }
+            }
+        }
+
+        return sql;
+    }
+
+    private static String getParameterValue(Object obj) {
+        String params = "";
+        if (obj instanceof String) {
+            params = "'" + obj + "'";
+        } else if (obj instanceof Date) {
+            Date date = (Date) obj;
+            params = "'" + DateUtil.formatDateTime(date) + "'";
+        } else if (Objects.isNull(obj)) {
+            params = "null";
+        } else {
+            params = obj.toString();
+        }
+
+        return Matcher.quoteReplacement(params);
+    }
+
+    @Override
+    public Object plugin(Object target) {
+        return Plugin.wrap(target, this);
+    }
+
+    @Override
+    public void setProperties(Properties properties) {
+
+    }
+}
+```
+
+2.配置为SqlSessionFactoryBean插件
+
+```java
+protected void registerSqlSessionFactoryBean(String beanName, SingleDatasourceProperties dataSourceProperties, DataSource dataSource) {
+    // ...
+    SqlSessionFactoryBean sqlSessionFactoryBean = new SqlSessionFactoryBean();
+    sqlSessionFactoryBean.setDataSource(dataSource);
+    // ...
+    sqlSessionFactoryBean.setMapperLocations(mapperXmlLocationResources);
+    // ...
+    // 核心语句
+    sqlSessionFactoryBean.setPlugins(new Interceptor[] { mybatisSqlLogInterceptor, buildPageInterceptor() });
+    // 注册bean
+    registerBean(beanName, sqlSessionFactoryBean);
+}
+```
+
+3.SqlSessionFactoryBean注册到Spring。
+
+import方式注入：
+
+```java
+@Configuration
+@Import({RbowDatasourceInitInvoker.class})
+public class RbowDatasourceAutoConfig {
+    private final ConfigurableBeanFactory beanFactory;
+    protected MybatisSqlLogInterceptor mybatisSqlLogInterceptor;
+    
+    // 构造方法注入
+    public RbowDatasourceInitInvoker(final ConfigurableBeanFactory beanFactory, final RbowDatasourceProperties rbowDatasourceProperties) {
+        // 1.注入Mybatis日志拦截器插件Bean
+        this.mybatisSqlLogInterceptor = new MybatisSqlLogInterceptor();
+        this.beanFactory = beanFactory;
+        
+        // 2.根据配置注入DataSources
+        Map<String, RbowSingleDatasourceProperties> dsProps = rbowDatasourceProperties.getDatasources();
+        
+        // 3.根据DataSources注入SqlSessionFactoryBean，并配置SqlSessionFactoryBean的插件
+        initSqlSessionFactory(String dsName, DataSource ds, RbowSingleDatasourceProperties dsProp)
+    }
+    
+    protected String initSqlSessionFactory(String dsName, DataSource ds, RbowSingleDatasourceProperties dsProp) {
+        // 1.生成Bean
+        SqlSessionFactoryBean fcBean = new SqlSessionFactoryBean();
+        fcBean.setDataSource(ds);
+
+        PathMatchingResourcePatternResolver resolver = new PathMatchingResourcePatternResolver();
+        try {
+            fcBean.setMapperLocations(resolver.getResources(dsProp.getMapperXmlLocation()));
+        } catch (IOException e) {
+            e.printStackTrace();
+            log.error(e.getMessage(), e);
+        }
+
+        // 2.增加插件：PageHelper
+        fcBean.setPlugins((new Interceptor[] { mybatisSqlLogInterceptor, this.buildPageInterceptor() }));
+
+        // 2.注册Bean
+        String sqlSessionFactoryBeanName = super.addSuffixBeanClassName(
+            dsName, RbowDatasourceConstant.SQL_SESSION_FACTORY_BEAN_NAME_SUFFIX);
+        super.registerBean(sqlSessionFactoryBeanName, fcBean);
+        return sqlSessionFactoryBeanName;
+    }
+}
 
 
-### 集成Pagehelper+日志+事务管理
+```
+
+### 集成Mybatis+事务管理
 
 
 
@@ -769,7 +1110,9 @@ public abstract class AbstractDatasourceInitInvoker {
 
 ### 集成权限验证+标准入参及校验+路由
 
+现有系统的思路是，用户登录时，注册一个token到Redis。
 
+用户后续访问时，Http头里面拿着这个Token去查Redis。查到信息则说明验证通过。
 
 ### 集成加密及签名
 
