@@ -1076,23 +1076,218 @@ public class RbowDatasourceAutoConfig {
 
 ```
 
-### 集成Mybatis+事务管理
+### 集成Mybatis+事务管理（支持多数据源）
+
+正常只有一个数据源的情况下，直接在配置类或主入口加`@EnableTransactionManagement`，然后在具体的方法上加`@Transactional`注解直接用即可。但是我们现在配置了多个数据源，所以需要配置TransactionManager。
+
+主要思路：
+
+```txt
+整体思路：
+监听应用启动完成时，自动为所有的@Transactional注解配置他们的transactionManager属性。@Transactional注解的路径与transactionManager的Bean名字的Map字典已在数据源初始化、transactionManager初始化时进行了缓存。
+
+具体步骤如下：
+1.数据源注入时在Mybatis的SqlSessionFactoryBean配置TransactionManager即可。
+2.多数据源需要手动在@Transactional上指明要用的TransactionManager(注解的transactionManager属性)。这里我具体实现的方法是，根据包路径自动配置@Transactionl的TransactionManager：
+  a.在第1步配置TransactionManager时将Map<BasePackageName, TransactionManagerName>缓存起来。
+  b.用ApplicationListener<ApplicationStartedEvent>监听到应用启动完成后，直接从beanFactory获取AbstractFallbackTransactionAttributeSource的Bean。
+  c.获取到AbstractFallbackTransactionAttributeSource的TransactionAttribute。TransactionAttribute就包含了方法和注解信息。
+  d.根据方法找到该方法的BasePackage，然后用这个BasePackage作为key，去第1步生成的缓存Map中找到对应的TransactionManagerName，然后把这个TransactionManagerNam设置到该方法@Transactional注解的TransactionManager属性即可。
+3.若要实现多个数据源之间的多个TransactionManager事务回滚，可结合AOP使用编程式事务，编码用TransactionManager管理。参照这里：https://www.cnblogs.com/shuaiandjun/p/8667815.html。当然如果跨微服务的话只能用分布式事务了。
+
+补充：
+  现在的多数据源，根据包来自动配置事务的TransactionManager。这样只能解决一个方法下只使用一个数据源的事务。如果一个方法下用到了两个数据源，这个时候事务怎么控制呢？这个后续进行扩展。一下提供两种思路：
+  1.自定义注解。自己在切面里手动获取所有数据源，然后一起提交或回滚。
+    https://blog.csdn.net/qq_41399429/article/details/87452548
+  2.动态数据源：通过切面操作AbstractRoutingDataSource。要在操作完DB后把threadLocal中的数据源清除。
+    https://blog.csdn.net/qq_37061442/article/details/82350258
+  3.使用分布式事务吧，参考下SEATA之类的。
+ 
+其他参考资料：
+  @Transactional常见失效情况：
+  https://blog.csdn.net/u013521220/article/details/106773508
+  
+spring涉及事务的代码调用顺序:
+service注解上@transactional-->TransactionInterceptor.interpter()-->TransactionAspectSupport.createTransactionIfNecessary()-->AbstractPlatformTransactionManager.getTransaction()-->DataSourceTransactionManager.doBegin()-->AbstractRoutingDataSource.determineTargetDataSource()[lookupKey==null去拿默认的Datasource, 不为空则使用获取到的连接]-->DataSourceTransactionManager.setTransactional()[将连接设置到TransactionUtils的threadLocal中]--->Repository@Annotation-->执行一般调用链, 问题在于SpringManagedTransaction.getConnection()-->openConnection()-->DataSourceUtils.getConnection()-->TransactionSynchronizationManager.getResource(dataSource)不为空[从TransactionUtils的threadLocal中获取数据源], 所以不会再去调用DynamicDataSource去获取数据源
+```
+
+1.1数据源注入时配置TransactionManager
+
+接前文数据源初始化类`AbstractDatasourceInitInvoker`，在初始化配置数据源时，创建对应的`TransactionManager`的Bean，并将该Bean缓存起来。
+
+```java
+public abstract class AbstractDatasourceInitInvoker {
+    private final ConfigurableBeanFactory beanFactory;
+
+    protected MybatisSqlLogInterceptor mybatisSqlLogInterceptor;
+		
+    // ......
+    
+	// 初始化数据源。如：注入SqlSessionFactory和MapperScannerConfigurer等
+    private void initDataSource(String dsName, DataSource ds, RbowSingleDatasourceProperties dsProp) {
+        // 配置SqlSessionFactoryBean
+        String sqlSessionFactoryBeanName = registSqlSessionFactoryBean(dsName, ds, dsProp);
+
+        // 配置MapperScannerConfiguer
+        this.registMapperScannerConfigurer(dsName, sqlSessionFactoryBeanName, dsProp);
+
+        // 配置DataSource的DataSourceTransactionManager
+        String dataSourceTransactionManagerName = this.addSuffixBeanClassName(
+                dsName, RbowDatasourceConstant.TRANSACTION_MANAGER_NAME_SUFFIX);
+        this.registDataSourceTransactionManager(dataSourceTransactionManagerName, ds);
+
+        // 保存数据源transactionBasePackagesName和数据源dataSourceTransactionManager的Map映射。
+        // 方便后续方法上根据包路径找到对应的TransactionManager
+        this.saveTransactionManagerInfo(dsProp.getTransactionBasePackages(), dataSourceTransactionManagerName);
+    }	
+    
+    // 注册DataSourceTransactionManager
+    private void registDataSourceTransactionManager(String dataSourceTransactionManagerName, DataSource ds) {
+        DataSourceTransactionManager dataSourceTransactionManager = new DataSourceTransactionManager(ds);
+        this.registerBean(dataSourceTransactionManagerName, dataSourceTransactionManager);
+    }
+    
+        // 保存数据源basepackageName和数据源dataSourceTransactionManager的Map映射。方便后续方法上根据包路径找到对应的TransactionManager
+    private void saveTransactionManagerInfo(String transactionBasePackagesName, String dataSourceTransactionManagerName) {
+        if (org.apache.commons.lang3.StringUtils.isBlank(transactionBasePackagesName)) {
+            return;
+        }
+
+        String[] transactionBasePackageArray = transactionBasePackagesName.split(SymbolConstant.COMMA);
+
+        InitTransactionalAnnotationValue.getMultiTransactionManagerNameMap().putIfAbsent(
+                transactionBasePackagesName, dataSourceTransactionManagerName);
+    }
+    
+    // ......
+}
+```
+
+1.2 监听到应用启动成功后，自动配置所有@Trasactional的TransactionManager信息。TransactionManager的Bean的生成、以及包路径和TransactionManager的对应关系，已在前一步完成。
+
+```java
+@Configuration
+@EnableConfigurationProperties({RbowDatasourceProperties.class})
+@Import({RbowDatasourceInitInvoker.class, RbowDatasourceAutoConfig.RegistPostProcessor.class})
+@EnableTransactionManagement
+public class RbowDatasourceAutoConfig {
+
+    // 注入RbowDatasourceInitPostProcessor
+    public static class RegistPostProcessor implements ImportBeanDefinitionRegistrar {
+       //...... 见前文
+    }
+
+    @Bean
+    public InitTransactionalAnnotationValue initTransactionalAnnotationValue(final BeanFactory beanFactory) {
+        return new InitTransactionalAnnotationValue(beanFactory);
+    }
+}
+```
+
+```java
+/**
+ * @Desc 由于配置的是多数据源，需要在初始化时，指定每个@Transactional的TransactionManager
+ */
+@Slf4j
+class InitTransactionalAnnotationValue implements ApplicationListener<ApplicationStartedEvent> {
+    private BeanFactory beanFactory;
+
+    private static final String ABSTRACT_FALLBACK_TRANSACTION_ATTRIBUTE_SOURCE_ATTRIBUTECACHE = "attributeCache";
+    private static final String METHOD_CLASS_KEY_METHOD = "method";
+
+    // 每个basePackage所对应的TransactionManagerName
+    private static ConcurrentMap<String, String> multiTransactionManagerNameMap
+            = new ConcurrentReferenceHashMap<>(4);
+
+    // 提供给外部以初始化该map信息
+    static ConcurrentMap<String, String> getMultiTransactionManagerNameMap() {
+        return multiTransactionManagerNameMap;
+    }
+
+    InitTransactionalAnnotationValue(BeanFactory beanFactory) {
+        this.beanFactory = beanFactory;
+    }
+
+    @Override
+    public void onApplicationEvent(ApplicationStartedEvent applicationStartedEvent) {
+        // 获取所有的事务信息
+        AbstractFallbackTransactionAttributeSource transactionAttributeSource = beanFactory
+                .getBean(AbstractFallbackTransactionAttributeSource.class);
+
+        // 获取所有含有事务的方法的事务属性。
+        // Key:具体的方法Key对象MethodClassKey，该对象包含了Method和它所在的类。Value：该方法上的@Transaction注解属性。
+        Map<Object, TransactionAttribute> attributeCache = this.getField(transactionAttributeSource,
+                AbstractFallbackTransactionAttributeSource.class,
+                ABSTRACT_FALLBACK_TRANSACTION_ATTRIBUTE_SOURCE_ATTRIBUTECACHE);
+        if (attributeCache == null || attributeCache.size() == 0) {
+            return;
+        }
+
+        // 一个Entry就是一个@Transactional注解及其方法信息。
+        // 根据方法的package路径找到该方法@Transactional注解应该配置的TransactionManager
+        for (Map.Entry<Object, TransactionAttribute> entry : attributeCache.entrySet()) {
+            // 已指明数据源或不是DefaultTransactionAttribute
+            if (!StringUtils.isEmpty(entry.getValue().getQualifier())
+                    || !(entry.getValue() instanceof DefaultTransactionAttribute)) {
+                continue;
+            }
+
+            // 将TransactionManager配置到该方法@Transactional注解
+            Method method = this.getField(entry.getKey(), MethodClassKey.class, METHOD_CLASS_KEY_METHOD);
+            if (method == null) {
+                continue;
+            }
+
+            boolean isTransactionalMethod = (AnnotationUtils.findAnnotation(method, Transactional.class) != null);
+            if (!isTransactionalMethod) {
+                continue;
+            }
+
+            DefaultTransactionAttribute transactionAttribute = (DefaultTransactionAttribute)entry.getValue();
+            String packageName = method.getDeclaringClass().getPackage().getName();
+            String transactionManagerName = this.getTransactionManagerName(packageName);
+            transactionAttribute.setQualifier(transactionManagerName);
+        }
+    }
+
+    // 根据包名，获取TransactionManager名称。该名称已于数据源初始化时存入内存
+    private String getTransactionManagerName(String packageName) {
+        for (Map.Entry<String, String> entry : multiTransactionManagerNameMap.entrySet()) {
+            if (packageName.startsWith(entry.getKey())) {
+                return entry.getValue();
+            }
+        }
+        return "";
+    }
+
+    private <T> T getField(Object object, Class<?> clazz, String fieldName) {
+        try {
+            Field field = clazz.getDeclaredField(fieldName);
+            field.setAccessible(true);
+            return (T)field.get(object);
+        } catch (NoSuchFieldException | IllegalAccessException e){
+            log.error(e.getMessage(), e);
+        }
+        return null;
+    }
+}
+```
+
+### (略)集成Mybatis代码生成器
+
+### (略)集成Sharding-jdbc
 
 
 
-### 集成Sharding-jdbc
+### 集成Id生成器
 
 
 
-### 集成Id生成器+Mybatis代码生成器
+### (略)集成自定义注解
 
 
 
-### 集成自动配置+自定义配置+自定义注解
-
-
-
-### 集成log4j2日志
+### 集成log4j2日志+链路追踪
 
 
 
