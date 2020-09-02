@@ -1319,7 +1319,23 @@ class InitTransactionalAnnotationValue implements ApplicationListener<Applicatio
 
 ### 集成测试框架
 
+集成Junit
 
+1.配置Jar包
+
+2.单个类测试示例
+
+3.多个类成套测试，也可以搭配自动查询该包下的所有测试类使用
+
+
+
+集成HttpClient
+
+(略)集成Mock
+
+(略)集成覆盖率检测
+
+(略)集成文件上传
 
 ### 集成swagger
 

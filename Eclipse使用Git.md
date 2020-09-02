@@ -10,7 +10,7 @@ top:
 [TOC]
 
 ### 一、基本操作
-![Git架构](https://img-blog.csdnimg.cn/20190421221809808.jpg?x-oss-process=image/watermark,type_ZmFuZ3poZW5naGVpdGk,shadow_10,text_aHR0cHM6Ly9ibG9nLmNzZG4ubmV0L3hpYW1vZnk=,size_16,color_FFFFFF,t_70)
+![Git仓库代码同步流程](https://md-images-1259736917.cos.ap-guangzhou.myqcloud.com/md-images/20190421221809808.jpg)
 
 1.工作空间 -> 本地仓库 : commit
 2.本地仓库 -> 远端仓库 : push
