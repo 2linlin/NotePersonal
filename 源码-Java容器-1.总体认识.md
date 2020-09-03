@@ -92,10 +92,10 @@ public interface Map<K,V> {}
 
 Map继承关系图：
 
-![](https://raw.githubusercontent.com/h2linlin/MarkdownImgRepositoryPersonal/master/20190814181937.png)
+![](https://md-images-1259736917.cos.ap-guangzhou.myqcloud.com/md-images/20190814181937.png)
 
 Collection继承关系图：
 
-![](https://raw.githubusercontent.com/h2linlin/MarkdownImgRepositoryPersonal/master/20190815003032.png)
+![](https://md-images-1259736917.cos.ap-guangzhou.myqcloud.com/md-images/20190815003032.png)
 
 以上就是整体分析。之后的文章我会按这个思路，分析Collection，再分析AbstractCollection和Set、List、Queue，再分析AbstractSet、AbstractList、AbstractQueue，最后分析具体实现类。Map的分析也是相近的思路。我们会先分析Map，再分析Collection。因为Set是基于Map实现的。
